@@ -1,0 +1,512 @@
+<!DOCTYPE html>
+<html>
+	<head>
+		<meta charset="UTF-8">
+		<title>Gray-Scott Reaction Diffusion System</title>
+		<script src="three.min.js"></script>
+		<script src="jquery-1.10.2.js"></script>
+		<script src="jquery-ui-1.10.4.custom.min.js"></script>
+		<link type="text/css" href="jquery-ui-1.10.4.custom.min.css" rel="stylesheet"/>
+		
+		<script type="x-shader/x-vertex" id="standardVertexShader">
+			varying vec2 vertUV;
+			
+			void main()
+			{
+				vertUV = uv;
+				gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+			}
+		</script>
+		
+		<script type="x-shader/x-fragment" id="gsFragmentShader">
+			varying vec2 vertUV;
+			uniform float screenWidth;
+			uniform float screenHeight;
+			uniform vec2 brush;
+			uniform sampler2D tSource;
+			
+			uniform float dt;
+			uniform float Du;
+			uniform float Dv;
+			uniform float feed;
+			uniform float kill;
+			
+			float step_x = 1.0 / screenWidth;
+			float step_y = 1.0 / screenHeight;
+			
+			void main()
+			{
+
+				vec2 uv   = texture2D(tSource, vertUV).rg;
+				vec2 uv_L = texture2D(tSource, vertUV + vec2(-step_x, 0.0)).rg;
+				vec2 uv_R = texture2D(tSource, vertUV + vec2( step_x, 0.0)).rg;
+				vec2 uv_D = texture2D(tSource, vertUV + vec2(0.0, -step_y)).rg;
+				vec2 uv_U = texture2D(tSource, vertUV + vec2(0.0,  step_y)).rg;
+				vec2 lapl = (uv_L + uv_R + uv_D + uv_U - 4.0 * uv);
+				
+				float du = Du * lapl.r - uv.r * uv.g * uv.g - feed * uv.r + feed;
+				float dv = Dv * lapl.g + uv.r * uv.g * uv.g - feed * uv.g - kill * uv.g;
+				
+				vec2 nextUV = uv + dt * vec2(du, dv);
+				
+				vec2 diff = (vertUV - brush) / vec2(step_x, step_y);				
+                if (dot(diff, diff) < brush.x)
+					nextUV.g = 0.9;						
+
+                gl_FragColor = vec4(nextUV.r, nextUV.g, 0.0, 1.0);
+			}
+		</script> 
+		
+		<script type="x-shader/x-fragment" id="screenFragmentShader">
+			varying vec2 vertUV;
+			uniform float screenWidth;
+			uniform float screenHeight;
+			uniform sampler2D tSource;
+			
+			vec2 texel = vec2(1.0 / screenWidth, 1.0 / screenHeight);
+			
+			vec4 c1 = vec4(0, 0, 0, 0.0);
+			vec4 c2 = vec4(1, 0, 0, 0.2);
+			vec4 c3 = vec4(0, 1, 0, 0.3);
+			vec4 c4 = vec4(0, 0, 1, 0.4);
+			vec4 c5 = vec4(1, 1, 1, 0.6);
+			
+			void main()
+			{
+				float value = texture2D(tSource, vertUV).g;
+				float a;
+				vec3 col;
+				
+				if (value <= c1.a)
+					col = c1.rgb;
+					
+				if (value > c1.a && value <= c2.a)
+				{
+					a = (value - c1.a) / (c2.a - c1.a);
+					col = mix(c1.rgb, c2.rgb, a);
+				}
+				
+				if (value > c2.a && value <= c3.a)
+				{
+					a = (value - c2.a) / (c3.a - c2.a);
+					col = mix(c2.rgb, c3.rgb, a);
+				}
+				
+				if (value > c3.a && value <= c4.a)
+				{
+					a = (value - c3.a) / (c4.a - c3.a);
+					col = mix(c3.rgb, c4.rgb, a);
+				}
+				
+				if (value > c4.a && value <= c5.a)
+				{
+					a = (value - c4.a) / (c5.a - c4.a);
+					col = mix(c4.rgb, c5.rgb, a);
+				}
+				
+				if (value > c5.a)
+					col = c5.rgb;
+				
+				gl_FragColor = vec4(col.r, col.g, col.b, 1.0);
+			}
+		</script>
+		
+		<script>
+			var canvas;
+			var mMouseX, mMouseY;
+			var isMouseDown = false;
+			
+			var mRenderer;
+			var mScene;
+			var mCamera;
+			
+			var mUniforms;
+			var mTexture1, mTexture2;
+			var mGSMaterial
+			var mScreenQuad;
+			var mToggled = false;
+			var mMinusOnes = new THREE.Vector2(-1, -1);
+			
+			var Du   = 0.2097;
+			var Dv   = 0.105;
+			var feed = 0.037;
+			var kill = 0.06;
+			
+			var init = function()
+			{
+				canvas = document.getElementById('myCanvas');
+				
+				canvas.onmousedown = onMouseDown;
+				canvas.onmousemove = onMouseMove;
+				canvas.onmouseup   = onMouseUp;
+				
+				mRenderer = new THREE.WebGLRenderer({canvas: canvas, preserveDrawingBuffer: true});
+				
+				mScene    = new THREE.Scene();
+				mCamera   = new THREE.OrthographicCamera(-0.5, 0.5, 0.5, -0.5, -10000, 10000);
+				mCamera.position.z = 100;
+				mScene.add(mCamera);
+				
+				mUniforms =
+					{
+						screenWidth:  {type: "f",  value: undefined},
+						screenHeight: {type: "f",  value: undefined},
+						tSource:      {type: "t",  value: undefined},
+						dt:           {type: "f",  value: 1.0      },
+						Du:           {type: "f",  value: Du       },
+						Dv:           {type: "f",  value: Dv       },
+						feed:         {type: "f",  value: feed     },
+						kill:         {type: "f",  value: kill     },
+						brush:        {type: "v2", value: new THREE.Vector2(-10, -10)}
+					};
+				
+				mGSMaterial = new THREE.ShaderMaterial(
+					{
+						uniforms      : mUniforms,
+						vertexShader  : document.getElementById('standardVertexShader').textContent,
+						fragmentShader: document.getElementById('gsFragmentShader').textContent
+					}
+				);
+				
+				mScreenMaterial = new THREE.ShaderMaterial(
+					{
+						uniforms      : mUniforms,
+						vertexShader  : document.getElementById('standardVertexShader').textContent,
+						fragmentShader: document.getElementById('screenFragmentShader').textContent
+					}
+				);
+				
+				var plane   = new THREE.PlaneGeometry(1.0, 1.0);
+				mScreenQuad = new THREE.Mesh(plane, mScreenMaterial);
+				mScene.add(mScreenQuad);
+				
+				resize(canvas.clientWidth, canvas.clientHeight);
+				render(0);
+				
+				mUniforms.brush.value = new THREE.Vector2(0.5, 0.5);
+			}
+			
+			var resize = function(width, height)
+			{
+				canvas.width  = width;
+				canvas.height = height;
+				mRenderer.setSize(width, height);
+				var speedUp = 2.0;
+				
+				mTexture1 = new THREE.WebGLRenderTarget(width / speedUp, height / speedUp,
+					{
+						minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
+						format:    THREE.RGBFormat, type: THREE.FloatType
+					}
+				);
+				
+				mTexture2 = new THREE.WebGLRenderTarget(width / speedUp, height / speedUp,
+					{
+						minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
+						format: THREE.RGBFormat, type: THREE.FloatType
+					}
+				); 
+				
+				mUniforms.screenWidth.value  = width  / speedUp;
+				mUniforms.screenHeight.value = height / speedUp;
+			}
+			
+			var render = function(time)
+			{   
+				mScreenQuad.material = mGSMaterial;
+				
+				for (var i = 0; i < 8; ++i)
+				{
+					if (!mToggled)
+					{
+						mUniforms.tSource.value = mTexture1;
+						mRenderer.render(mScene, mCamera, mTexture2, true);
+						mUniforms.tSource.value = mTexture2;
+					}
+					else
+					{
+						mUniforms.tSource.value = mTexture2;
+						mRenderer.render(mScene, mCamera, mTexture1, true);
+						mUniforms.tSource.value = mTexture1;
+					}
+					
+					mToggled = !mToggled;
+					mUniforms.brush.value = mMinusOnes;
+				}
+				
+				mScreenQuad.material = mScreenMaterial;
+				
+				mRenderer.render(mScene, mCamera);
+				requestAnimationFrame(render);
+			}
+			
+			var onMouseDown = function(e)
+			{
+				var ev = e ? e : window.event;
+				isMouseDown = true;
+				var ux = mMouseX / canvas.width * devicePixelRatio;
+				var uv = 1.0 - mMouseY / canvas.height * devicePixelRatio;
+				mUniforms.brush.value = new THREE.Vector2(ux, uv);
+			}
+			
+			var onMouseMove = function(e)
+			{
+				var ev = e ? e : window.event;
+				var rect = canvas.getBoundingClientRect();
+				mMouseX = ev.clientX - rect.left; 
+				mMouseY = ev.clientY - rect.top; 
+				
+				if (isMouseDown)
+				{
+					var ux = mMouseX / canvas.width * devicePixelRatio;
+					var uv = 1.0 - mMouseY / canvas.height * devicePixelRatio;
+					mUniforms.brush.value = new THREE.Vector2(ux, uv);
+				}
+			}
+			
+			var onMouseUp = function(e)
+			{
+				isMouseDown = false;
+			}
+			
+			var clearScreen = function()
+			{
+				while (mScene.children.length > 0)
+					mScene.remove(mScene.children[0]);
+				
+				init();
+				document.getElementById('paternSelector').value = "1";
+			}
+			
+			$(function()
+			{
+				$("#slider1").slider(
+					{
+						value: feed,
+						min:   0,
+						max:   0.1,
+						range: "min",
+						step:  0.001,
+						slide: function(e, ui)
+							{
+								$('#num1').val(ui.value);
+								mUniforms.feed.value = ui.value;
+							},
+						create: function(e, ui)
+							{
+								$('#num1').val($(this).slider('option', 'value'));
+							}
+					}
+				);
+				
+				$("#slider2").slider(
+					{
+						value: kill,
+						min:   0,
+						max:   0.073,
+						range: "min",
+						step:  0.001,
+						slide: function(e, ui)
+							{
+								$('#num2').val(ui.value);
+								mUniforms.kill.value = ui.value;
+							},
+						create: function(e, ui)
+							{
+								$('#num2').val($(this).slider('option', 'value'));
+							}
+					}
+				);
+				
+				$("#slider3").slider(
+					{
+						value: Du,
+						min:   0,
+						max:   0.400,
+						range: "min",
+						step:  0.001,
+						slide: function(e, ui)
+							{
+								$('#num3').val(ui.value);
+								mUniforms.Du.value = ui.value;
+								
+							},
+						create: function(e, ui)
+							{
+								$('#num3').val($(this).slider('option', 'value'));
+							}
+					}
+				);
+				
+				$("#slider4").slider(
+					{
+						value: Dv,
+						min:   0,
+						max:   0.200,
+						range: "min",
+						step:  0.001,
+						slide: function(e, ui)
+							{
+								$('#num4').val(ui.value);
+								mUniforms.Dv.value = ui.value;
+							},
+						create: function(e, ui)
+							{
+								$('#num4').val($(this).slider('option', 'value'));
+							}
+					}
+				);
+				
+				$("#btn_clear").button();
+			});
+			
+			function setValues(feed, kill, Du, Dv)
+			{
+				$('#num1').val(feed);
+				$('#slider1').slider('value', feed);
+				mUniforms.feed.value = feed;
+				
+				$('#num2').val(kill);
+				$('#slider2').slider('value', kill);
+				mUniforms.kill.value = kill;
+				
+				$('#num3').val(Du);
+				$('#slider3').slider('value', Du);
+				mUniforms.Du.value = Du;
+				
+				$('#num4').val(Dv);
+				$('#slider4').slider('value', Dv);
+				mUniforms.Dv.value = Dv;
+			}
+			
+			function setParams()
+			{
+				var v = $("select[name='params']").val();
+				
+				switch (v)
+				{
+					case '1':
+						setValues(0.037, 0.06 , 0.2097, 0.105);
+						break;
+					case '2':
+						setValues(0.034, 0.056, 0.2097, 0.105);
+						break;
+					case '3':
+						setValues(0.037, 0.06 , 0.2   , 0.05 );
+						break;
+					case '4':
+						setValues(0.025, 0.06 , 0.2097, 0.105);
+						break;
+					case '5':
+						setValues(0.006, 0.029, 0.082 , 0.149);
+						break;
+					case '6':
+						setValues(0.02 , 0.048, 0.2097, 0.105);
+						break;
+					case '7':
+						setValues(0.05 , 0.06 , 0.2097, 0.105);
+						break;
+					case '8':
+						setValues(0.007, 0.045, 0.2097, 0.105);
+						break;
+					case '9':
+						setValues(0.032, 0.056, 0.2097, 0.105);
+						break;
+					case '10':
+						setValues(0.073, 0.062, 0.2097, 0.105);
+						break;
+					case '11':
+						setValues(0.034, 0.052, 0.174 , 0.045);
+						break;
+					case '12':
+						setValues(0.092, 0.057, 0.2097, 0.105);
+						break;
+					case '13':
+						setValues(0.051, 0.053, 0.112 , 0.021);
+						break;
+					case '14':
+						setValues(0.037, 0.06 , 0.16  , 0.1  );
+						break;
+					case '15':
+						setValues(0.037, 0.06 , 0.2   , 0.149);
+						break;
+				}
+			}
+		</script>
+		
+		<style>
+			#myCanvas       {width: 1024px; height: 512px;}
+			.sliderControl  {width:  300px; margin:  10px;}
+			.numText        {font-size: large;}
+			#paternSelector {width: 180px; height: 35px; font-size: x-large;}
+		</style>
+		
+	</head>
+	
+	<body onload=init()>
+		<canvas id="myCanvas"></canvas>
+		<table>
+			<tr>
+				<td>
+					<h2>feed :</h2> 
+				</td>
+				<td>
+					<input id="num1" class="numText" type="text" size="3" readonly/>
+				</td>
+				<td>
+					<div id="slider1" class="sliderControl"></div>
+				</td>
+				
+				<td>
+					<h2>Du :</h2>
+				</td>
+				<td>
+					<input id="num3" class="numText" type="text" size="3" readonly/>
+				</td>
+				<td>
+					<div id="slider3" class="sliderControl"></div>
+				</td>
+			</tr>
+			<tr>
+				<td>
+					<h2>kill :</h2>
+				</td>
+				<td>
+					<input id="num2" class="numText" type="text" size="3" readonly/>
+				</td>
+				<td>
+					<div id="slider2" class="sliderControl"></div>
+				</td>
+				
+				<td>
+					<h2>Dv :</h2>
+				</td>
+				<td>
+					<input id="num4" class="numText" type="text" size="3" readonly/>
+				</td>
+				<td>
+					<div id="slider4" class="sliderControl"></div>
+				</td>
+			</tr>
+		</table>
+		<button id="btn_clear" onclick="clearScreen()">Clear</button>
+		<select id="paternSelector" name="params" onchange="setParams()">
+			<option value= "1">Default      </option>
+			<option value= "2">chaosholes   </option>
+			<option value= "3">electronic   </option>
+			<option value= "4">neon         </option>
+			<option value= "5">maru         </option>
+			<option value= "6">echo?        </option>
+			<option value= "7">precious ikra</option>
+			<option value= "8">roll         </option>
+			<option value= "9">bone density </option>
+			<option value="10">bluebone     </option>
+			<option value="11">gleen net    </option>
+			<option value="12">blue         </option>
+			<option value="13">peacock      </option>
+			<option value="14">worm         </option>
+			<option value="15">dot          </option>
+		</select>
+	</body>
+	
+</html>
